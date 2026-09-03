@@ -499,12 +499,26 @@ pub struct Usage {
     pub output_tokens: i32,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS, ExperimentalApi)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub struct TurnCompletedNotification {
     pub thread_id: String,
     pub turn: Turn,
+    #[experimental("thread/start.semanticMode")]
+    #[serde(default)]
+    pub semantic_completion: Option<SemanticCompletion>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct SemanticCompletion {
+    pub initial_model: String,
+    pub initial_model_provider: String,
+    pub final_model: String,
+    pub final_model_provider: String,
+    pub rerouted: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]

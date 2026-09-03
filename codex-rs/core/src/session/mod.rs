@@ -407,6 +407,7 @@ pub(crate) enum ForkPersistence {
 
 pub(crate) struct SessionSpawnArgs {
     pub(crate) config: Config,
+    pub(crate) semantic_mode: bool,
     pub(crate) allow_provider_model_fallback: bool,
     pub(crate) user_instructions: LoadedUserInstructions,
     pub(crate) installation_id: String,
@@ -504,6 +505,7 @@ impl Session {
     async fn spawn_internal(args: SessionSpawnArgs) -> CodexResult<(Arc<Self>, SessionIo)> {
         let SessionSpawnArgs {
             mut config,
+            semantic_mode,
             allow_provider_model_fallback,
             user_instructions,
             installation_id,
@@ -596,11 +598,12 @@ impl Session {
         } else {
             codex_models_manager::manager::RefreshStrategy::OnlineIfUncached
         };
-        if config.model.is_none()
-            || !matches!(
-                refresh_strategy,
-                codex_models_manager::manager::RefreshStrategy::Offline
-            )
+        if !semantic_mode
+            && (config.model.is_none()
+                || !matches!(
+                    refresh_strategy,
+                    codex_models_manager::manager::RefreshStrategy::Offline
+                ))
         {
             let _ = models_manager
                 .list_models(refresh_strategy, config.http_client_factory())
@@ -705,6 +708,7 @@ impl Session {
         let service_tier =
             get_service_tier(config.service_tier.clone(), fast_mode_enabled, &model_info);
         let session_configuration = SessionConfiguration {
+            semantic_mode,
             provider: create_model_provider(
                 config.model_provider.clone(),
                 Some(Arc::clone(&auth_manager)),
@@ -1772,6 +1776,10 @@ impl Session {
             .session_configuration
             .original_config_do_not_use
             .clone()
+    }
+
+    pub(crate) async fn semantic_mode(&self) -> bool {
+        self.state.lock().await.session_configuration.semantic_mode
     }
 
     pub(crate) async fn user_instructions(&self) -> Option<codex_extension_api::Instructions> {
@@ -3699,13 +3707,17 @@ impl Session {
             developer_sections
                 .push(DeveloperInstructions::new(developer_instructions).render_fragment());
         }
-        let loaded_plugins = self
-            .services
-            .plugins_manager
-            .plugins_for_config(&turn_context.config.plugins_config_input())
-            .await;
+        let loaded_plugins = if turn_context.semantic_mode {
+            Default::default()
+        } else {
+            self.services
+                .plugins_manager
+                .plugins_for_config(&turn_context.config.plugins_config_input())
+                .await
+        };
         let features = turn_context.config.features.get();
-        let recommended_plugin_candidates = if features.enabled(Feature::Apps)
+        let recommended_plugin_candidates = if !turn_context.semantic_mode
+            && features.enabled(Feature::Apps)
             && features.enabled(Feature::Plugins)
             && (features.enabled(Feature::ToolSuggest)
                 || features.enabled(Feature::RecommendedPlugins))

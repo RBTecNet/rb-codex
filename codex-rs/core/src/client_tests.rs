@@ -12,6 +12,7 @@ use super::X_OPENAI_SUBAGENT_HEADER;
 use crate::AttestationContext;
 use crate::AttestationProvider;
 use crate::GenerateAttestationFuture;
+use crate::client_common::SemanticPromptPolicy;
 use crate::responses_metadata::CodexResponsesMetadata;
 use crate::test_support::TestCodexResponsesRequestKind;
 use crate::test_support::responses_metadata as test_responses_metadata;
@@ -283,6 +284,86 @@ fn test_model_info() -> ModelInfo {
         "experimental_supported_tools": []
     }))
     .expect("deserialize test model info")
+}
+
+#[test]
+fn semantic_final_request_validator_rejects_late_instruction_contributor() -> anyhow::Result<()> {
+    let client = test_model_client(SessionSource::Cli);
+    let model = test_model_info();
+    let schema = json!({
+        "type": "object",
+        "properties": { "answer": { "type": "string" } },
+        "additionalProperties": true
+    });
+    let authoritative_input = vec![ResponseItem::Message {
+        id: None,
+        role: "user".to_string(),
+        content: vec![ContentItem::InputText {
+            text: "authoritative semantic input".to_string(),
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    }];
+    let model_instructions = "resolved model instructions".to_string();
+    let prompt = Prompt {
+        input: authoritative_input.clone(),
+        base_instructions: BaseInstructions {
+            text: model_instructions.clone(),
+            provenance: Some(codex_protocol::models::BaseInstructionsProvenance::Model {
+                model: model.slug.clone(),
+            }),
+        },
+        output_schema: Some(schema.clone()),
+        output_schema_strict: false,
+        semantic_policy: Some(SemanticPromptPolicy {
+            model: model.slug.clone(),
+            model_instructions,
+            authoritative_input,
+            output_schema: Some(schema),
+        }),
+        ..Default::default()
+    };
+    let mut request = client.build_responses_request(
+        &prompt,
+        &model,
+        /*effort*/ None,
+        codex_protocol::config_types::ReasoningSummary::None,
+        /*service_tier*/ None,
+        &test_responses_metadata_for_client(
+            &client,
+            /*turn_id*/ Some("late-instruction-turn"),
+            format!("{}:0", client.state.thread_id),
+            /*parent_thread_id*/ None,
+            TestCodexResponsesRequestKind::Turn,
+        ),
+    )?;
+    client.validate_semantic_responses_request(&prompt, &model, &request)?;
+
+    request.input.insert(
+        0,
+        ResponseItem::Message {
+            id: None,
+            role: "developer".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "RB_SENTINEL_SYNTHETIC_LATE_INSTRUCTION".to_string(),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        },
+    );
+    let error = client
+        .validate_semantic_responses_request(&prompt, &model, &request)
+        .expect_err("late instruction contamination must fail before dispatch");
+    assert_eq!(
+        error.to_string(),
+        "RB semantic mode refused final instruction contamination: instructionContaminationCount=1"
+    );
+    assert!(
+        !error
+            .to_string()
+            .contains("RB_SENTINEL_SYNTHETIC_LATE_INSTRUCTION")
+    );
+    Ok(())
 }
 
 #[test]

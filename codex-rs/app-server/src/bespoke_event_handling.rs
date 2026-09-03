@@ -51,6 +51,7 @@ use codex_app_server_protocol::PermissionsRequestApprovalResponse;
 use codex_app_server_protocol::RawResponseCompletedNotification;
 use codex_app_server_protocol::RawResponseItemCompletedNotification;
 use codex_app_server_protocol::RequestId;
+use codex_app_server_protocol::SemanticCompletion;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ServerRequestPayload;
 use codex_app_server_protocol::StrictReviewRequiredNotification;
@@ -195,10 +196,30 @@ pub(crate) async fn apply_bespoke_event_handling(
             thread_watch_manager
                 .note_turn_completed(&conversation_id.to_string(), turn_failed)
                 .await;
+            let semantic_completion = if conversation.semantic_mode().await {
+                let config = conversation.config_snapshot().await;
+                let final_model = thread_state
+                    .lock()
+                    .await
+                    .turn_summary
+                    .semantic_final_model
+                    .clone()
+                    .unwrap_or_else(|| config.model.clone());
+                Some(SemanticCompletion {
+                    initial_model: config.model.clone(),
+                    initial_model_provider: config.model_provider_id.clone(),
+                    rerouted: final_model != config.model,
+                    final_model,
+                    final_model_provider: config.model_provider_id,
+                })
+            } else {
+                None
+            };
             handle_turn_complete(
                 conversation_id,
                 event_turn_id,
                 turn_complete_event,
+                semantic_completion,
                 &outgoing,
                 &thread_state,
             )
@@ -369,6 +390,8 @@ pub(crate) async fn apply_bespoke_event_handling(
             }
         }
         EventMsg::ModelReroute(event) => {
+            thread_state.lock().await.turn_summary.semantic_final_model =
+                Some(event.to_model.clone());
             let notification = ModelReroutedNotification {
                 thread_id: conversation_id.to_string(),
                 turn_id: event_turn_id.clone(),
@@ -1316,6 +1339,7 @@ struct TurnCompletionMetadata {
     started_at: Option<i64>,
     completed_at: Option<i64>,
     duration_ms: Option<i64>,
+    semantic_completion: Option<SemanticCompletion>,
 }
 
 async fn emit_turn_completed_with_status(
@@ -1340,6 +1364,7 @@ async fn emit_turn_completed_with_status(
             completed_at: turn_completion_metadata.completed_at,
             duration_ms: turn_completion_metadata.duration_ms,
         },
+        semantic_completion: turn_completion_metadata.semantic_completion,
     };
     outgoing
         .send_server_notification(ServerNotification::TurnCompleted(notification))
@@ -1515,6 +1540,7 @@ async fn handle_turn_complete(
     conversation_id: ThreadId,
     event_turn_id: String,
     turn_complete_event: TurnCompleteEvent,
+    semantic_completion: Option<SemanticCompletion>,
     outgoing: &ThreadScopedOutgoingMessageSender,
     thread_state: &Arc<Mutex<ThreadState>>,
 ) {
@@ -1535,6 +1561,7 @@ async fn handle_turn_complete(
             started_at: turn_summary.started_at,
             completed_at: turn_complete_event.completed_at,
             duration_ms: turn_complete_event.duration_ms,
+            semantic_completion,
         },
         outgoing,
     )
@@ -1560,6 +1587,7 @@ async fn handle_turn_interrupted(
             started_at: turn_summary.started_at,
             completed_at: turn_aborted_event.completed_at,
             duration_ms: turn_aborted_event.duration_ms,
+            semantic_completion: None,
         },
         outgoing,
     )
@@ -3695,6 +3723,7 @@ mod tests {
             conversation_id,
             event_turn_id.clone(),
             event,
+            None,
             &outgoing,
             &thread_state,
         )
@@ -3804,6 +3833,7 @@ mod tests {
             conversation_id,
             event_turn_id.clone(),
             turn_complete_event(&event_turn_id),
+            None,
             &outgoing,
             &thread_state,
         )
@@ -4042,6 +4072,7 @@ mod tests {
             conversation_a,
             a_turn1.clone(),
             turn_complete_event(&a_turn1),
+            None,
             &outgoing,
             &thread_state,
         )
@@ -4064,6 +4095,7 @@ mod tests {
             conversation_b,
             b_turn1.clone(),
             turn_complete_event(&b_turn1),
+            None,
             &outgoing,
             &thread_state,
         )
@@ -4075,6 +4107,7 @@ mod tests {
             conversation_a,
             a_turn2.clone(),
             turn_complete_event(&a_turn2),
+            None,
             &outgoing,
             &thread_state,
         )

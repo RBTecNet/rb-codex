@@ -96,6 +96,7 @@ pub(crate) struct TurnSummary {
     pub(crate) command_execution_started: HashSet<String>,
     pub(crate) last_error: Option<TurnError>,
     pub(crate) last_agent_message: Option<ThreadItem>,
+    pub(crate) semantic_final_model: Option<String>,
 }
 
 #[derive(Default)]

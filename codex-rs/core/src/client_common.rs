@@ -36,6 +36,18 @@ pub struct Prompt {
     pub output_schema_strict: bool,
 
     pub(crate) cyber_access_program: Option<codex_protocol::turn_input::CyberAccessProgram>,
+
+    /// Immutable authority used to verify the fully serialized RB semantic
+    /// request immediately before model dispatch.
+    pub(crate) semantic_policy: Option<SemanticPromptPolicy>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct SemanticPromptPolicy {
+    pub(crate) model: String,
+    pub(crate) model_instructions: String,
+    pub(crate) authoritative_input: Vec<ResponseItem>,
+    pub(crate) output_schema: Option<Value>,
 }
 
 impl Default for Prompt {
@@ -48,6 +60,7 @@ impl Default for Prompt {
             output_schema: None,
             output_schema_strict: true,
             cyber_access_program: None,
+            semantic_policy: None,
         }
     }
 }

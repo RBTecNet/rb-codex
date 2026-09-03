@@ -48,15 +48,28 @@ async fn turn_start_accepts_output_schema_v2() -> Result<()> {
         mcp.read_stream_until_response_message(RequestId::Integer(thread_req)),
     )
     .await??;
-    let ThreadStartResponse { thread, .. } = to_response::<ThreadStartResponse>(thread_resp)?;
+    let ThreadStartResponse {
+        thread,
+        semantic_preflight,
+        ..
+    } = to_response::<ThreadStartResponse>(thread_resp)?;
+    assert_eq!(semantic_preflight, None);
 
     let output_schema = serde_json::json!({
         "type": "object",
         "properties": {
-            "answer": { "type": "string" }
+            "answer": { "type": "string" },
+            "choice": {
+                "oneOf": [
+                    { "type": "string" },
+                    { "type": "number" }
+                ]
+            },
+            "optionalNote": { "type": "string" },
+            "items": { "type": "array", "items": {} }
         },
         "required": ["answer"],
-        "additionalProperties": false
+        "additionalProperties": true
     });
 
     let turn_req = mcp
@@ -86,6 +99,20 @@ async fn turn_start_accepts_output_schema_v2() -> Result<()> {
 
     let request = response_mock.single_request();
     let payload = request.body_json();
+    assert!(
+        payload
+            .get("tools")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|tools| !tools.is_empty()),
+        "normal Codex must retain its model-visible tools"
+    );
+    assert!(
+        payload
+            .get("instructions")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|instructions| !instructions.is_empty()),
+        "normal Codex must retain its instructions"
+    );
     let text = payload.get("text").expect("request missing text field");
     let format = text
         .get("format")

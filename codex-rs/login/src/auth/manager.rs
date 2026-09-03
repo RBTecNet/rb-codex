@@ -51,6 +51,7 @@ pub use crate::auth::storage::AgentIdentityStorage;
 pub use crate::auth::storage::AuthDotJson;
 pub use crate::auth::storage::AuthKeyringBackendKind;
 use crate::auth::storage::AuthStorageBackend;
+use crate::auth::storage::FileAuthStorage;
 use crate::auth::storage::create_auth_storage;
 use crate::auth::util::try_parse_error_message;
 use crate::default_client::create_client;
@@ -2048,6 +2049,7 @@ pub struct AuthManager {
     external_auth: RwLock<Option<Arc<dyn ExternalAuth>>>,
     workload_identity_selected: bool,
     auth_route_config: AuthRouteConfig,
+    explicit_auth_file: bool,
 }
 
 /// Configuration view required to construct a shared [`AuthManager`].
@@ -2150,6 +2152,20 @@ impl AuthManager {
             .await
             .ok()
             .flatten();
+        Self::from_auth_config_and_auth(
+            auth_config,
+            enable_codex_api_key_env,
+            managed_auth,
+            /*explicit_auth_file*/ false,
+        )
+    }
+
+    fn from_auth_config_and_auth(
+        auth_config: AuthConfig,
+        enable_codex_api_key_env: bool,
+        managed_auth: Option<CodexAuth>,
+        explicit_auth_file: bool,
+    ) -> Self {
         let AuthConfig {
             codex_home,
             auth_credentials_store_mode,
@@ -2184,6 +2200,7 @@ impl AuthManager {
             external_auth: RwLock::new(None),
             workload_identity_selected: false,
             auth_route_config,
+            explicit_auth_file,
         }
     }
 
@@ -2218,6 +2235,7 @@ impl AuthManager {
             external_auth: RwLock::new(None),
             workload_identity_selected: false,
             auth_route_config: crate::test_support::transport_default_auth_route_config(),
+            explicit_auth_file: false,
         })
     }
 
@@ -2246,6 +2264,7 @@ impl AuthManager {
             external_auth: RwLock::new(None),
             workload_identity_selected: false,
             auth_route_config: crate::test_support::transport_default_auth_route_config(),
+            explicit_auth_file: false,
         })
     }
 
@@ -2282,6 +2301,7 @@ impl AuthManager {
             external_auth: RwLock::new(None),
             workload_identity_selected: false,
             auth_route_config: crate::test_support::transport_default_auth_route_config(),
+            explicit_auth_file: false,
         })
     }
 
@@ -2312,6 +2332,7 @@ impl AuthManager {
             auth_route_config: AuthRouteConfig::from_http_client_factory(HttpClientFactory::new(
                 OutboundProxyPolicy::ReqwestDefault,
             )),
+            explicit_auth_file: false,
         })
     }
 
@@ -2711,6 +2732,71 @@ impl AuthManager {
         enable_codex_api_key_env: bool,
     ) -> Result<Arc<Self>, AuthManagerInitializationError> {
         Self::shared_from_auth_config(auth_config_from(config), enable_codex_api_key_env).await
+    }
+
+    /// Loads only an explicitly selected file-backed ChatGPT auth store. API
+    /// key and access-token environment variables are intentionally bypassed.
+    /// Refreshes keep using the same selected `auth.json` through its parent.
+    pub async fn shared_from_explicit_auth_file(
+        config: &impl AuthManagerConfig,
+        auth_file: &Path,
+    ) -> std::io::Result<Arc<Self>> {
+        if auth_file.file_name().and_then(|name| name.to_str()) != Some("auth.json") {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "explicit auth file must be named auth.json",
+            ));
+        }
+        let auth_home = auth_file.parent().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "explicit auth file must have a parent directory",
+            )
+        })?;
+        let storage = FileAuthStorage::new(auth_home.to_path_buf());
+        let auth_dot_json = storage.load()?.ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "explicit ChatGPT auth file was not found",
+            )
+        })?;
+        if auth_dot_json.resolved_mode() != AuthMode::Chatgpt {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "explicit auth file must contain file-backed ChatGPT login",
+            ));
+        }
+        let mut auth_config = auth_config_from(config);
+        auth_config.codex_home = auth_home.to_path_buf();
+        auth_config.auth_credentials_store_mode = AuthCredentialsStoreMode::File;
+        let agent_identity_base_url =
+            agent_identity_authapi_base_url(auth_config.chatgpt_base_url.as_deref()).ok();
+        let auth = CodexAuth::from_auth_dot_json(
+            auth_home,
+            auth_dot_json,
+            AuthCredentialsStoreMode::File,
+            auth_config.chatgpt_base_url.as_deref(),
+            auth_config.keyring_backend_kind,
+            agent_identity_base_url.as_deref(),
+            &auth_config.auth_route_config,
+        )
+        .await?;
+        if !auth_config.allows_auth(&auth) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "explicit ChatGPT auth is forbidden by managed authentication requirements",
+            ));
+        }
+        Ok(Arc::new(Self::from_auth_config_and_auth(
+            auth_config,
+            /*enable_codex_api_key_env*/ false,
+            Some(auth),
+            /*explicit_auth_file*/ true,
+        )))
+    }
+
+    pub fn uses_explicit_file_auth(&self) -> bool {
+        self.explicit_auth_file
     }
 
     /// Activates workload identity against an auth config resolved before full runtime config.

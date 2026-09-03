@@ -1957,6 +1957,139 @@ fn auth_config_from_preserves_all_fields() {
 
 #[tokio::test]
 #[serial(codex_auth_env)]
+async fn explicit_auth_file_reuses_chatgpt_store_and_ignores_env_auth() {
+    let isolated_home = tempdir().expect("isolated home");
+    let auth_home = tempdir().expect("auth home");
+    write_auth_file(
+        AuthFileParams {
+            openai_api_key: None,
+            chatgpt_plan_type: Some("plus".to_string()),
+            chatgpt_account_id: Some("forced-workspace".to_string()),
+        },
+        auth_home.path(),
+    )
+    .expect("write test auth");
+    let _api_key_guard = EnvVarGuard::set(CODEX_API_KEY_ENV_VAR, "must-not-win");
+    let _access_token_guard = EnvVarGuard::set(CODEX_ACCESS_TOKEN_ENV_VAR, "must-not-win");
+    let _openai_guard = EnvVarGuard::set("OPENAI_API_KEY", "must-not-win");
+    let _anthropic_guard = EnvVarGuard::set("ANTHROPIC_API_KEY", "must-not-win");
+    let _deepseek_guard = EnvVarGuard::set("DEEPSEEK_API_KEY", "must-not-win");
+    let _aws_access_guard = EnvVarGuard::set("AWS_ACCESS_KEY_ID", "must-not-win");
+    let _aws_secret_guard = EnvVarGuard::set("AWS_SECRET_ACCESS_KEY", "must-not-win");
+    let _arbitrary_guard = EnvVarGuard::set("RB_ARBITRARY_SECRET_SENTINEL", "must-not-win");
+    let config = test_auth_manager_config(isolated_home.path());
+
+    let manager =
+        AuthManager::shared_from_explicit_auth_file(&config, &auth_home.path().join("auth.json"))
+            .await
+            .expect("load explicit ChatGPT auth");
+
+    assert_eq!(manager.auth_mode(), Some(AuthMode::Chatgpt));
+    assert!(manager.uses_explicit_file_auth());
+    assert!(!isolated_home.path().join("auth.json").exists());
+}
+
+#[tokio::test]
+async fn explicit_auth_file_fails_closed_without_fallback() {
+    let isolated_home = tempdir().expect("isolated home");
+    write_auth_file(
+        AuthFileParams {
+            openai_api_key: None,
+            chatgpt_plan_type: Some("plus".to_string()),
+            chatgpt_account_id: Some("forced-workspace".to_string()),
+        },
+        isolated_home.path(),
+    )
+    .expect("write fallback auth that must not be used");
+    let selected_home = tempdir().expect("selected home");
+    let config = test_auth_manager_config(isolated_home.path());
+
+    let missing = AuthManager::shared_from_explicit_auth_file(
+        &config,
+        &selected_home.path().join("auth.json"),
+    )
+    .await
+    .expect_err("missing selected store must not fall back");
+    assert_eq!(missing.kind(), std::io::ErrorKind::NotFound);
+
+    std::fs::write(
+        selected_home.path().join("auth.json"),
+        r#"{"OPENAI_API_KEY":"synthetic-api-key","tokens":null}"#,
+    )
+    .expect("write unsupported auth mode");
+    let unsupported = AuthManager::shared_from_explicit_auth_file(
+        &config,
+        &selected_home.path().join("auth.json"),
+    )
+    .await
+    .expect_err("non-ChatGPT selected store must fail closed");
+    assert_eq!(unsupported.kind(), std::io::ErrorKind::InvalidInput);
+
+    let wrong_name = AuthManager::shared_from_explicit_auth_file(
+        &config,
+        &selected_home.path().join("credentials.json"),
+    )
+    .await
+    .expect_err("unsupported store shape must fail closed");
+    assert_eq!(wrong_name.kind(), std::io::ErrorKind::InvalidInput);
+}
+
+#[tokio::test]
+#[serial(codex_auth_env)]
+async fn explicit_auth_refresh_writes_only_selected_store() {
+    let isolated_home = tempdir().expect("isolated home");
+    let auth_home = tempdir().expect("auth home");
+    write_auth_file(
+        AuthFileParams {
+            openai_api_key: None,
+            chatgpt_plan_type: Some("plus".to_string()),
+            chatgpt_account_id: Some("forced-workspace".to_string()),
+        },
+        auth_home.path(),
+    )
+    .expect("write selected auth");
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/oauth/token"))
+        .and(body_partial_json(json!({
+            "grant_type": "refresh_token",
+            "refresh_token": "test-refresh-token"
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "access_token": "refreshed-access-token",
+            "refresh_token": "refreshed-refresh-token"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let _refresh_url_guard = EnvVarGuard::set(
+        REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR,
+        &format!("{}/oauth/token", server.uri()),
+    );
+    let config = test_auth_manager_config(isolated_home.path());
+    let manager =
+        AuthManager::shared_from_explicit_auth_file(&config, &auth_home.path().join("auth.json"))
+            .await
+            .expect("load selected auth");
+
+    manager
+        .refresh_token_from_authority()
+        .await
+        .expect("refresh selected store");
+
+    let selected = FileAuthStorage::new(auth_home.path().to_path_buf())
+        .load()
+        .expect("read selected store")
+        .expect("selected store exists");
+    let tokens = selected.tokens.expect("selected store keeps tokens");
+    assert_eq!(tokens.access_token, "refreshed-access-token");
+    assert_eq!(tokens.refresh_token, "refreshed-refresh-token");
+    assert!(!isolated_home.path().join("auth.json").exists());
+    server.verify().await;
+}
+
+#[tokio::test]
+#[serial(codex_auth_env)]
 async fn shared_from_config_prefers_workload_identity_to_explicit_access_token() {
     let codex_home = tempdir().expect("tempdir");
     let config = test_auth_manager_config(codex_home.path());

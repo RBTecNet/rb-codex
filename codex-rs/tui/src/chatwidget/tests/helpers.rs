@@ -1013,6 +1013,7 @@ pub(super) fn handle_turn_completed(
     chat.handle_server_notification(
         ServerNotification::TurnCompleted(TurnCompletedNotification {
             thread_id: chat.thread_id.map(|id| id.to_string()).unwrap_or_default(),
+            semantic_completion: None,
             turn: app_server_turn(
                 turn_id,
                 AppServerTurnStatus::Completed,
@@ -1028,6 +1029,7 @@ pub(super) fn handle_turn_interrupted(chat: &mut ChatWidget, turn_id: &str) {
     chat.handle_server_notification(
         ServerNotification::TurnCompleted(TurnCompletedNotification {
             thread_id: chat.thread_id.map(|id| id.to_string()).unwrap_or_default(),
+            semantic_completion: None,
             turn: app_server_turn(
                 turn_id,
                 AppServerTurnStatus::Interrupted,

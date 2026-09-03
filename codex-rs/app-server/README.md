@@ -8,6 +8,7 @@
 - [Message Schema](#message-schema)
 - [Core Primitives](#core-primitives)
 - [Lifecycle Overview](#lifecycle-overview)
+- [RB Semantic Mode](#rb-semantic-mode)
 - [Initialization](#initialization)
 - [API Overview](#api-overview)
 - [Events](#events)
@@ -81,6 +82,46 @@ Use the thread APIs to create, list, or archive conversations. Drive a conversat
 - Begin a turn: To send user input, call `turn/start` with the target `threadId` and the user's input. Optional fields let you override model, cwd, sandbox policy or experimental `permissions` profile selection, approval policy, approvals reviewer, etc. This immediately returns the new turn object. The app-server emits `turn/started` when that turn actually begins running.
 - Stream events: After `turn/start`, keep reading JSON-RPC notifications on stdout. You’ll see `item/started`, `item/completed`, deltas like `item/agentMessage/delta`, tool progress, etc. These represent streaming model output plus any side effects (commands, tool calls, reasoning notes).
 - Finish the turn: When the model is done (or the turn is interrupted via making the `turn/interrupt` call), the server sends `turn/completed` with the final turn state and token usage.
+
+## RB Semantic Mode
+
+The separately built `rb-codex` binary adds an experimental, fail-closed semantic
+transport mode to app-server. Start it with an isolated `CODEX_HOME` and an
+explicit file-backed ChatGPT credential store:
+
+```shell
+rb-codex app-server --auth-file /absolute/path/to/auth.json
+```
+
+The auth file is referenced in place and must contain ChatGPT login credentials;
+API-key, access-token, and keyring stores are not accepted by this override.
+Credential refreshes use the selected file rather than copying it into the
+isolated Codex home.
+
+Request semantic mode explicitly with experimental API support:
+
+```json
+{
+  "method": "thread/start",
+  "id": 10,
+  "params": {
+    "semanticMode": true
+  }
+}
+```
+
+Semantic mode forces an ephemeral thread, accepts one root `turn/start`, requires
+an `outputSchema`, and sends that schema unchanged with non-strict validation.
+The `thread/start` response includes `semanticPreflight`, containing the resolved
+model/provider, zero-tool attestation, declared instruction-isolation policy,
+and auth/session facts. Instruction isolation is enforced on the final provider
+request rather than represented by a reconstructed provenance count or digest.
+Preflight failure prevents a model request. The turn also fails if an executable action is observed or if the
+completed root turn does not contain exactly one authoritative final assistant
+message. Clients must use completed item/turn state rather than streamed deltas.
+
+This mode is absent from stock builds and does not alter app-server behavior when
+`semanticMode` is omitted or false.
 
 ## Initialization
 

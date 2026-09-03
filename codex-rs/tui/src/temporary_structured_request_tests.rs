@@ -31,6 +31,7 @@ fn agent_message_notification(turn_id: &str, text: &str) -> ServerNotification {
 fn turn_completed_notification(turn_id: &str, status: TurnStatus) -> ServerNotification {
     ServerNotification::TurnCompleted(TurnCompletedNotification {
         thread_id: "thread-1".to_string(),
+        semantic_completion: None,
         turn: Turn {
             id: turn_id.to_string(),
             items: Vec::new(),

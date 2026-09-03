@@ -7,6 +7,7 @@ use std::sync::atomic::Ordering;
 use crate::client::ModelClientSession;
 use crate::client_common::Prompt;
 use crate::client_common::ResponseEvent;
+use crate::client_common::SemanticPromptPolicy;
 use crate::compact::InitialContextInjection;
 use crate::compact::run_inline_auto_compact_task;
 use crate::compact_remote::run_inline_remote_auto_compact_task;
@@ -139,6 +140,70 @@ use tracing::warn;
 
 const POST_SAMPLING_TOKEN_ESTIMATE_TARGET: &str = "codex_core::post_sampling_token_estimate";
 
+fn semantic_action_category(item: &ResponseItem) -> Option<&'static str> {
+    match item {
+        ResponseItem::LocalShellCall { .. } => Some("commandExecutionEvents"),
+        ResponseItem::WebSearchCall { .. } => Some("webSearchEvents"),
+        ResponseItem::ImageGenerationCall { .. } => Some("otherToolEvents"),
+        ResponseItem::ToolSearchCall { .. } | ResponseItem::AdditionalTools { .. } => {
+            Some("otherToolEvents")
+        }
+        ResponseItem::CustomToolCall { name, .. } if name == "apply_patch" => {
+            Some("fileChangeEvents")
+        }
+        ResponseItem::CustomToolCall { .. } => Some("otherToolEvents"),
+        ResponseItem::FunctionCall {
+            name, namespace, ..
+        } => {
+            if namespace.as_deref() == Some("apps")
+                || namespace.as_deref() == Some("codex_apps")
+                || namespace
+                    .as_deref()
+                    .is_some_and(|value| value.starts_with("mcp__codex_apps"))
+            {
+                Some("appToolEvents")
+            } else if namespace.as_deref() == Some("mcp")
+                || namespace
+                    .as_deref()
+                    .is_some_and(|value| value.starts_with("mcp__"))
+            {
+                Some("mcpToolEvents")
+            } else if name == "apply_patch" {
+                Some("fileChangeEvents")
+            } else if matches!(
+                name.as_str(),
+                "exec_command" | "unified_exec" | "shell" | "write_stdin"
+            ) {
+                Some("commandExecutionEvents")
+            } else {
+                Some("otherToolEvents")
+            }
+        }
+        _ => None,
+    }
+}
+
+async fn reject_semantic_action(
+    sess: &Session,
+    turn_context: &TurnContext,
+    item: &ResponseItem,
+) -> CodexResult<()> {
+    let Some(category) = semantic_action_category(item) else {
+        return Ok(());
+    };
+    let message = format!("RB semantic mode invalid action: category={category} count=1");
+    sess.send_event(
+        turn_context,
+        EventMsg::Error(ErrorEvent {
+            misalignment: None,
+            message: message.clone(),
+            codex_error_info: Some(CodexErrorInfo::BadRequest),
+        }),
+    )
+    .await;
+    Err(CodexErr::InvalidRequest(message))
+}
+
 /// Takes initial turn input and runs a loop where, at each sampling request,
 /// the model replies with either:
 ///
@@ -160,8 +225,27 @@ pub(crate) async fn run_turn(
     prewarmed_client_session: Option<ModelClientSession>,
     cancellation_token: CancellationToken,
 ) -> CodexResult<Option<String>> {
+    if turn_context.semantic_mode
+        && (input.len() != 1
+            || !matches!(&input[0], TurnInput::UserInput { content, .. } if !content.is_empty()))
+    {
+        return Err(CodexErr::InvalidRequest(
+            "RB semantic mode requires exactly one non-empty user input".to_string(),
+        ));
+    }
+    if turn_context.semantic_mode
+        && sess
+            .semantic_turn_started
+            .swap(true, std::sync::atomic::Ordering::AcqRel)
+    {
+        return Err(CodexErr::InvalidRequest(
+            "RB semantic mode permits exactly one requested Codex turn".to_string(),
+        ));
+    }
     // Record results from hooks that finished after the previous turn before this turn's user prompt.
-    drain_async_hook_results(&sess, &turn_context, /*before_user_prompt*/ true).await;
+    if !turn_context.semantic_mode {
+        drain_async_hook_results(&sess, &turn_context, /*before_user_prompt*/ true).await;
+    }
 
     let mut client_session =
         prewarmed_client_session.unwrap_or_else(|| sess.services.model_client.new_session());
@@ -169,13 +253,14 @@ pub(crate) async fn run_turn(
     // new user message are recorded. Estimate pending incoming items (context
     // diffs/full reinjection + user input) and trigger compaction preemptively
     // when they would push the thread over the compaction threshold.
-    if let Err(err) = run_pre_sampling_compact(
-        &sess,
-        &turn_context,
-        &mut client_session,
-        &cancellation_token,
-    )
-    .await
+    if !turn_context.semantic_mode
+        && let Err(err) = run_pre_sampling_compact(
+            &sess,
+            &turn_context,
+            &mut client_session,
+            &cancellation_token,
+        )
+        .await
     {
         if matches!(err.details(), CodexErrorDetails::TurnAborted) {
             run_hooks_and_record_inputs(&sess, &turn_context, &input, PersistContext::Standard)
@@ -193,7 +278,19 @@ pub(crate) async fn run_turn(
     }
 
     let user_input = turn_user_input(&input);
-    let (required_servers, mentioned_plugins) =
+    let semantic_sampling_input = turn_context
+        .semantic_mode
+        .then(|| vec![sess.response_item_from_user_input(user_input.clone())]);
+    if let Some(input) = semantic_sampling_input.as_ref()
+        && turn_context.semantic_input.set(input.clone()).is_err()
+    {
+        return Err(CodexErr::InvalidRequest(
+            "RB semantic mode input authority was already initialized".to_string(),
+        ));
+    }
+    let (required_servers, mentioned_plugins) = if turn_context.semantic_mode {
+        Default::default()
+    } else {
         match required_mcp_servers_for_input(&sess, turn_context.as_ref(), &user_input)
             .or_cancel(&cancellation_token)
             .await
@@ -204,7 +301,8 @@ pub(crate) async fn run_turn(
                     .await;
                 return Err(err.into());
             }
-        };
+        }
+    };
 
     // run_turn owns the step used to seed context and make the first sampling request.
     let first_step_context = match sess
@@ -250,23 +348,41 @@ pub(crate) async fn run_turn(
     );
     let mut world_state = world_state?;
 
-    let Some((injection_items, explicitly_enabled_connectors)) = build_skills_and_plugins(
-        &sess,
-        first_step_context.as_ref(),
-        &user_input,
-        &mentioned_plugins,
-        &cancellation_token,
-    )
-    .await
-    else {
-        return Ok(None);
+    let (injection_items, explicitly_enabled_connectors) = if turn_context.semantic_mode {
+        Default::default()
+    } else {
+        let Some(result) = build_skills_and_plugins(
+            &sess,
+            first_step_context.as_ref(),
+            &user_input,
+            &mentioned_plugins,
+            &cancellation_token,
+        )
+        .await
+        else {
+            return Ok(None);
+        };
+        result
     };
 
-    if run_pending_session_start_hooks(&sess, &turn_context).await {
+    if !turn_context.semantic_mode && run_pending_session_start_hooks(&sess, &turn_context).await {
         return Ok(None);
     }
     let mut can_drain_pending_input = input.is_empty();
-    if run_hooks_and_record_inputs(&sess, &turn_context, &input, PersistContext::TurnStart).await {
+    if turn_context.semantic_mode {
+        for input_item in &input {
+            record_pending_input(
+                &sess,
+                &turn_context,
+                input_item.clone(),
+                Vec::new(),
+                PersistContext::TurnStart,
+            )
+            .await;
+        }
+    } else if run_hooks_and_record_inputs(&sess, &turn_context, &input, PersistContext::TurnStart)
+        .await
+    {
         return Ok(None);
     }
 
@@ -314,13 +430,14 @@ pub(crate) async fn run_turn(
             Vec::new()
         };
 
-        if run_hooks_and_record_inputs(
-            &sess,
-            &turn_context,
-            &pending_input,
-            PersistContext::Standard,
-        )
-        .await
+        if !turn_context.semantic_mode
+            && run_hooks_and_record_inputs(
+                &sess,
+                &turn_context,
+                &pending_input,
+                PersistContext::Standard,
+            )
+            .await
         {
             break;
         }
@@ -370,13 +487,18 @@ pub(crate) async fn run_turn(
                 .await?;
 
             // Construct the input that we will send to the model.
-            let sampling_request_input: Vec<ResponseItem> = async {
-                sess.clone_history()
+            let sampling_request_input: Vec<ResponseItem> = match &semantic_sampling_input {
+                Some(input) => input.clone(),
+                None => {
+                    async {
+                        sess.clone_history()
+                            .await
+                            .for_prompt(&step_context.settings.model_info.input_modalities)
+                    }
+                    .instrument(trace_span!("run_turn.prepare_sampling_request_input"))
                     .await
-                    .for_prompt(&step_context.settings.model_info.input_modalities)
-            }
-            .instrument(trace_span!("run_turn.prepare_sampling_request_input"))
-            .await;
+                }
+            };
 
             let responses_metadata = sess
                 .responses_metadata(turn_context.as_ref(), CodexResponsesRequestKind::Turn)
@@ -410,7 +532,14 @@ pub(crate) async fn run_turn(
                 }
                 can_drain_pending_input = true;
                 // Process async hooks only after sampling and its tools have finished.
-                drain_async_hook_results(&sess, &turn_context, /*before_user_prompt*/ false).await;
+                if !turn_context.semantic_mode {
+                    drain_async_hook_results(
+                        &sess,
+                        &turn_context,
+                        /*before_user_prompt*/ false,
+                    )
+                    .await;
+                }
                 let (has_pending_input, token_status) = async {
                     let has_pending_input =
                         sess.input_queue.has_pending_input(&sess.active_turn).await;
@@ -502,6 +631,9 @@ pub(crate) async fn run_turn(
 
                 if !needs_follow_up {
                     last_agent_message = sampling_request_last_agent_message;
+                    if turn_context.semantic_mode {
+                        break;
+                    }
                     let stop_outcome = run_turn_stop_hooks(
                         &sess,
                         &step_context,
@@ -1206,6 +1338,11 @@ async fn run_auto_compact(
     phase: CompactionPhase,
 ) -> CodexResult<()> {
     let turn_context = &step_context.turn;
+    if turn_context.semantic_mode {
+        return Err(CodexErr::InvalidRequest(
+            crate::rb_semantic::AUTO_COMPACTION_REJECTED.to_string(),
+        ));
+    }
     let _profile_guard = turn_context.turn_timing_state.begin_compaction();
     if turn_context.config.features.enabled(Feature::TokenBudget) {
         // Compaction is the reset request, so force a new context window
@@ -1336,16 +1473,51 @@ pub(crate) fn build_prompt(
     base_instructions: BaseInstructions,
 ) -> Prompt {
     let turn_context = &step_context.turn;
+    let input = if turn_context.semantic_mode {
+        turn_context
+            .semantic_input
+            .get()
+            .cloned()
+            .unwrap_or_default()
+    } else {
+        input
+    };
+    let base_instructions = if turn_context.semantic_mode {
+        BaseInstructions {
+            text: step_context
+                .settings
+                .model_info
+                .get_model_instructions(/*personality*/ None),
+            provenance: Some(codex_protocol::models::BaseInstructionsProvenance::Model {
+                model: step_context.settings.model_info.slug.clone(),
+            }),
+        }
+    } else {
+        base_instructions
+    };
+    let semantic_policy = turn_context.semantic_mode.then(|| SemanticPromptPolicy {
+        model: step_context.settings.model_info.slug.clone(),
+        model_instructions: base_instructions.text.clone(),
+        authoritative_input: input.clone(),
+        output_schema: turn_context.final_output_json_schema.clone(),
+    });
     Prompt {
         input,
         tools: step_context.tool_router.model_visible_specs(),
         parallel_tool_calls: true,
         base_instructions,
         output_schema: turn_context.final_output_json_schema.clone(),
-        output_schema_strict: !crate::guardian::is_basic_session_source(
-            &turn_context.session_source,
-        ),
-        cyber_access_program: turn_context.cyber_access_program,
+        output_schema_strict: if turn_context.semantic_mode {
+            false
+        } else {
+            !crate::guardian::is_basic_session_source(&turn_context.session_source)
+        },
+        cyber_access_program: if turn_context.semantic_mode {
+            None
+        } else {
+            turn_context.cyber_access_program
+        },
+        semantic_policy,
     }
 }
 
@@ -1471,6 +1643,12 @@ pub(crate) async fn prepare_tool_recommendations(
     sess: &Session,
     turn_context: &TurnContext,
 ) -> PreparedToolRecommendations {
+    if turn_context.semantic_mode {
+        return PreparedToolRecommendations {
+            auth: None,
+            endpoint_candidates: None,
+        };
+    }
     let loaded_plugins = sess
         .services
         .plugins_manager
@@ -2321,6 +2499,24 @@ async fn try_run_sampling_request(
         match event {
             ResponseEvent::Created => {}
             ResponseEvent::OutputItemDone(mut item) => {
+                if turn_context.semantic_mode
+                    && let Err(err) =
+                        reject_semantic_action(sess.as_ref(), turn_context.as_ref(), &item).await
+                {
+                    break Err(err);
+                }
+                if turn_context.semantic_mode
+                    && matches!(
+                        &item,
+                        ResponseItem::Message { role, phase, .. }
+                            if role == "assistant"
+                                && !matches!(phase, Some(MessagePhase::Commentary))
+                    )
+                {
+                    turn_context
+                        .semantic_final_message_count
+                        .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                }
                 assign_missing_streamed_response_item_id(&mut item, active_item.as_ref());
                 if analytics_tool_call_ids.len() < MAX_ANALYTICS_TOOL_CALL_IDS_PER_RESPONSE {
                     let call_id = match &item {
@@ -2432,6 +2628,12 @@ async fn try_run_sampling_request(
                 }
             }
             ResponseEvent::OutputItemAdded(mut item) => {
+                if turn_context.semantic_mode
+                    && let Err(err) =
+                        reject_semantic_action(sess.as_ref(), turn_context.as_ref(), &item).await
+                {
+                    break Err(err);
+                }
                 assign_missing_streamed_response_item_id(&mut item, /*active_item*/ None);
                 if let ResponseItem::CustomToolCall {
                     call_id,
@@ -2570,6 +2772,24 @@ async fn try_run_sampling_request(
                 usage_metadata,
                 end_turn,
             } => {
+                let semantic_final_message_count = turn_context
+                    .semantic_final_message_count
+                    .load(std::sync::atomic::Ordering::Acquire);
+                if turn_context.semantic_mode && semantic_final_message_count != 1 {
+                    let message = format!(
+                        "RB semantic mode requires exactly one final assistant message; observed {semantic_final_message_count}"
+                    );
+                    sess.send_event(
+                        &turn_context,
+                        EventMsg::Error(ErrorEvent {
+                            misalignment: None,
+                            message: message.clone(),
+                            codex_error_info: Some(CodexErrorInfo::BadRequest),
+                        }),
+                    )
+                    .await;
+                    break Err(CodexErr::InvalidRequest(message));
+                }
                 sess.services
                     .analytics_events_client
                     .track_code_mode_tool_call(

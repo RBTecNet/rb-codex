@@ -158,6 +158,10 @@ pub struct InProcessStartArgs {
     pub session_source: SessionSource,
     /// Whether auth loading should honor the `CODEX_API_KEY` environment variable.
     pub enable_codex_api_key_env: bool,
+    /// Optional explicitly selected file-backed ChatGPT auth store.
+    pub explicit_auth_file: Option<std::path::PathBuf>,
+    /// Whether this host is the RB semantic runtime build.
+    pub rb_semantic_runtime: bool,
     /// Initialize params used for initial handshake.
     pub initialize: InitializeParams,
     /// Capacity used for all runtime queues (clamped to at least 1).
@@ -417,17 +421,26 @@ async fn start_uninitialized(args: InProcessStartArgs) -> IoResult<InProcessClie
     args.config.auth_config().validate()?;
     let channel_capacity = args.channel_capacity.max(1);
     let installation_id = resolve_installation_id(&args.config.codex_home).await?;
-    let auth_manager =
-        AuthManager::shared_from_config(args.config.as_ref(), args.enable_codex_api_key_env)
-            .await
-            .map_err(IoError::other)?;
+    let auth_manager = match args.explicit_auth_file.as_deref() {
+        Some(path) => {
+            AuthManager::shared_from_explicit_auth_file(args.config.as_ref(), path).await?
+        }
+        None => {
+            AuthManager::shared_from_config(args.config.as_ref(), args.enable_codex_api_key_env)
+                .await
+                .map_err(IoError::other)?
+        }
+    };
     let (client_tx, mut client_rx) = mpsc::channel::<InProcessClientMessage>(channel_capacity);
     let (event_tx, event_rx) = mpsc::channel::<InProcessServerEvent>(channel_capacity);
 
     let runtime_handle = tokio::spawn(async move {
         let (outgoing_tx, outgoing_rx) = mpsc::channel::<OutgoingEnvelope>(channel_capacity);
-        let analytics_events_client =
-            analytics_events_client_from_config(Arc::clone(&auth_manager), args.config.as_ref());
+        let analytics_events_client = if args.rb_semantic_runtime {
+            codex_analytics::AnalyticsEventsClient::disabled()
+        } else {
+            analytics_events_client_from_config(Arc::clone(&auth_manager), args.config.as_ref())
+        };
         let analytics_events_flush_client = analytics_events_client.clone();
         let outgoing_message_sender = Arc::new(OutgoingMessageSender::new(
             outgoing_tx,
@@ -486,7 +499,12 @@ async fn start_uninitialized(args: InProcessStartArgs) -> IoResult<InProcessClie
                 code_mode_session_provider: None,
                 rpc_transport: AppServerRpcTransport::InProcess,
                 remote_control_handle: None,
-                plugin_startup_tasks: crate::PluginStartupTasks::Start,
+                plugin_startup_tasks: if args.rb_semantic_runtime {
+                    crate::PluginStartupTasks::Skip
+                } else {
+                    crate::PluginStartupTasks::Start
+                },
+                rb_semantic_runtime: args.rb_semantic_runtime,
             }));
             let mut thread_created_rx = processor.thread_created_receiver();
             let session = Arc::new(ConnectionSessionState::new());
@@ -844,6 +862,8 @@ mod tests {
             config_warnings: Vec::new(),
             session_source,
             enable_codex_api_key_env: false,
+            explicit_auth_file: None,
+            rb_semantic_runtime: false,
             initialize: InitializeParams {
                 client_info: ClientInfo {
                     name: "codex-in-process-test".to_string(),
@@ -1007,6 +1027,7 @@ mod tests {
                     completed_at: Some(0),
                     duration_ms: None,
                 },
+                semantic_completion: None,
             })
         ));
         assert!(server_notification_requires_delivery(

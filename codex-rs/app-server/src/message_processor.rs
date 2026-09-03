@@ -259,6 +259,7 @@ pub(crate) struct MessageProcessorArgs {
     pub(crate) rpc_transport: AppServerRpcTransport,
     pub(crate) remote_control_handle: Option<RemoteControlHandle>,
     pub(crate) plugin_startup_tasks: crate::PluginStartupTasks,
+    pub(crate) rb_semantic_runtime: bool,
 }
 
 impl MessageProcessor {
@@ -283,6 +284,7 @@ impl MessageProcessor {
             rpc_transport,
             remote_control_handle,
             plugin_startup_tasks,
+            rb_semantic_runtime,
         } = args;
         let thread_state_manager = ThreadStateManager::new();
         // The thread store is intentionally process-scoped. Config reloads can
@@ -318,13 +320,9 @@ impl MessageProcessor {
                     Arc::clone(&extension_event_sink),
                 ))
             });
-            let manager = ThreadManager::new(
-                config.as_ref(),
-                auth_manager.clone(),
-                codex_core::build_models_manager(config.as_ref(), auth_manager.clone()),
-                codex_core::CodexAppsToolsCache::default(),
-                session_source,
-                environment_manager,
+            let extensions = if rb_semantic_runtime {
+                codex_extension_api::empty_extension_registry()
+            } else {
                 thread_extensions(
                     guardian_agent_spawner(thread_manager.clone()),
                     ThreadExtensionDependencies {
@@ -340,7 +338,16 @@ impl MessageProcessor {
                         http_client_factory: config.http_client_factory(),
                         queue_service: queue_service.clone(),
                     },
-                ),
+                )
+            };
+            let manager = ThreadManager::new(
+                config.as_ref(),
+                auth_manager.clone(),
+                codex_core::build_models_manager(config.as_ref(), auth_manager.clone()),
+                codex_core::CodexAppsToolsCache::default(),
+                session_source,
+                environment_manager,
+                extensions,
                 Arc::new(CodexHomeUserInstructionsProvider::new(
                     config.codex_home.clone(),
                 )),
@@ -363,8 +370,11 @@ impl MessageProcessor {
             }
         });
         let models_manager = thread_manager.get_models_manager();
-        let models_refresh_worker =
-            crate::models_refresh_worker::spawn(&models_manager, config.http_client_factory());
+        let models_refresh_worker = if rb_semantic_runtime {
+            crate::models_refresh_worker::ModelsRefreshWorker::disabled()
+        } else {
+            crate::models_refresh_worker::spawn(&models_manager, config.http_client_factory())
+        };
         let turn_cost_worker =
             TurnCostWorker::spawn(Arc::clone(&config), Arc::clone(&auth_manager));
         thread_manager
@@ -503,6 +513,7 @@ impl MessageProcessor {
             Arc::clone(&skills_watcher),
             turn_cost_worker.as_ref().map(TurnCostWorker::handle),
             config_warnings,
+            rb_semantic_runtime,
         );
         let turn_processor = TurnRequestProcessor::new(
             auth_manager,

@@ -61,6 +61,7 @@ impl ChatWidget {
                             completed_at,
                             duration_ms,
                         },
+                        semantic_completion: None,
                     },
                     Some(replay_kind),
                 );

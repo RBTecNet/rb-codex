@@ -70,10 +70,13 @@ pub(crate) struct Session {
     pub(super) fork_persistence: ForkPersistence,
     pub(super) forked_from_ordinal_exclusive: Option<u64>,
     pub(super) next_internal_sub_id: AtomicU64,
+    pub(super) semantic_turn_started: std::sync::atomic::AtomicBool,
 }
 
 #[derive(Clone)]
 pub(crate) struct SessionConfiguration {
+    /// Explicit RB semantic transport policy for this thread.
+    pub(super) semantic_mode: bool,
     /// Runtime provider and its provider-specific execution policy.
     pub(super) provider: SharedModelProvider,
 
@@ -653,6 +656,7 @@ impl Session {
         git_enrichment_policy: GitEnrichmentPolicy,
         windows_sandbox_proxy_settings_mode: codex_sandboxing::WindowsSandboxProxySettingsMode,
     ) -> anyhow::Result<Arc<Self>> {
+        let semantic_mode = session_configuration.semantic_mode;
         debug!(
             "Configuring session: model={}; provider={:?}",
             session_configuration
@@ -932,20 +936,24 @@ impl Session {
             .unwrap_or_else(|| session_configuration.cwd().to_path_buf());
         let auth_and_mcp_fut = async move {
             let auth = auth_manager_clone.auth().await;
-            let mcp_projection = mcp_manager_for_mcp
-                .runtime_config_for_step(
-                    &config_for_mcp,
-                    mcp_thread_init_for_startup,
-                    thread_extension_data_for_mcp,
-                    McpThreadIdentity {
-                        session_source: &mcp_session_source,
-                        originator: &mcp_originator,
-                        environments: McpEnvironmentScope::Initial(environment_selections),
-                    },
-                    /*ready_selected_capability_roots*/ &[],
-                    /*executor_capability_discovery*/ None,
-                )
-                .await;
+            let mcp_projection = if semantic_mode {
+                crate::mcp::McpRuntimeProjection::semantic_isolated(&config_for_mcp)
+            } else {
+                mcp_manager_for_mcp
+                    .runtime_config_for_step(
+                        &config_for_mcp,
+                        mcp_thread_init_for_startup,
+                        thread_extension_data_for_mcp,
+                        McpThreadIdentity {
+                            session_source: &mcp_session_source,
+                            originator: &mcp_originator,
+                            environments: McpEnvironmentScope::Initial(environment_selections),
+                        },
+                        /*ready_selected_capability_roots*/ &[],
+                        /*executor_capability_discovery*/ None,
+                    )
+                    .await
+            };
             (auth, mcp_projection)
         }
         .instrument(info_span!(
@@ -1178,13 +1186,20 @@ impl Session {
             );
             let resolved_environments = turn_environments.snapshot().await;
             let agents_md_manager = Arc::new(AgentsMdManager::new(user_instructions));
-            let plugin_skill_warmup = warm_plugins_and_skills_for_session_init(
-                Arc::clone(&config),
-                Arc::clone(&plugins_manager),
-                Arc::clone(&skills_service),
-                &resolved_environments,
-                extensions.as_ref(),
-            )
+            let plugin_skill_warmup = async {
+                if semantic_mode {
+                    Vec::new()
+                } else {
+                    warm_plugins_and_skills_for_session_init(
+                        Arc::clone(&config),
+                        Arc::clone(&plugins_manager),
+                        Arc::clone(&skills_service),
+                        &resolved_environments,
+                        extensions.as_ref(),
+                    )
+                    .await
+                }
+            }
             .instrument(info_span!(
                 "session_init.plugin_skill_warmup",
                 otel.name = "session_init.plugin_skill_warmup",
@@ -1195,8 +1210,17 @@ impl Session {
                         "session_init.thread_name_lookup",
                         otel.name = "session_init.thread_name_lookup",
                     ));
+            let agents_md_refresh = async {
+                if semantic_mode {
+                    Ok(())
+                } else {
+                    agents_md_manager
+                        .refresh(config.as_ref(), &resolved_environments)
+                        .await
+                }
+            };
             let (agents_md_result, plugin_skill_errors, thread_name) = tokio::join!(
-                agents_md_manager.refresh(config.as_ref(), &resolved_environments),
+                agents_md_refresh,
                 plugin_skill_warmup,
                 thread_name_lookup,
             );
@@ -1279,12 +1303,16 @@ impl Session {
             let mcp_runtime = Arc::new(McpRuntime::empty(
                 mcp_projection.config.prefix_mcp_tool_names,
             ));
-            let hooks_config = build_hooks_config(
-                &config,
-                plugins_manager.as_ref(),
-                resolved_environments.single_local_environment(),
-            )
-            .await;
+            let hooks_config = if semantic_mode {
+                codex_hooks::HooksConfig::default()
+            } else {
+                build_hooks_config(
+                    &config,
+                    plugins_manager.as_ref(),
+                    resolved_environments.single_local_environment(),
+                )
+                .await
+            };
             let (hooks, async_hook_results) = Hooks::new(
                 hooks_config,
                 thread_id,
@@ -1421,6 +1449,7 @@ impl Session {
                     attestation_provider,
                     config.http_client_factory(),
                 )
+                .with_websockets_disabled(semantic_mode)
                 .with_free_guardian_enabled(config.free_guardian_enabled())
                 .with_prompt_cache_key_override(
                     crate::guardian::prompt_cache_key_override_for_review_session(
@@ -1464,6 +1493,7 @@ impl Session {
                 fork_persistence,
                 forked_from_ordinal_exclusive,
                 next_internal_sub_id: AtomicU64::new(0),
+                semantic_turn_started: std::sync::atomic::AtomicBool::new(false),
             });
             if let Some(network_policy_decider_session) = network_policy_decider_session {
                 let mut guard = network_policy_decider_session.write().await;
@@ -1543,9 +1573,11 @@ impl Session {
                 mcp_runtime_cwd,
             )
             .await?;
-            sess.start_mcp_prewarm_worker(mcp_prewarm_rx, mcp_auth_changes);
-            sess.schedule_startup_prewarm(session_configuration.base_instructions.clone())
-                .await;
+            if !session_configuration.semantic_mode {
+                sess.start_mcp_prewarm_worker(mcp_prewarm_rx, mcp_auth_changes);
+                sess.schedule_startup_prewarm(session_configuration.base_instructions.clone())
+                    .await;
+            }
             let session_start_source = match &initial_history {
                 InitialHistory::Resumed(_) => codex_hooks::SessionStartSource::Resume,
                 InitialHistory::New | InitialHistory::Forked(_) => {

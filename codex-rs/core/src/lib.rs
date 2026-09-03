@@ -9,6 +9,7 @@ mod apply_patch;
 mod apps;
 mod client;
 mod client_common;
+pub mod rb_semantic;
 mod realtime_context;
 mod realtime_conversation;
 mod realtime_prompt;

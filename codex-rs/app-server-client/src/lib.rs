@@ -252,6 +252,8 @@ impl InProcessClientStartArgs {
             config_warnings: self.config_warnings,
             session_source: self.session_source,
             enable_codex_api_key_env: self.enable_codex_api_key_env,
+            explicit_auth_file: None,
+            rb_semantic_runtime: false,
             initialize,
             channel_capacity: self.channel_capacity,
         }
@@ -1045,6 +1047,7 @@ mod tests {
                 completed_at: Some(0),
                 duration_ms: Some(1),
             },
+            semantic_completion: None,
         })
     }
 

@@ -192,6 +192,10 @@ pub(crate) struct NewTurnContextOptions {
 /// The context needed for a single turn of the thread.
 #[derive(Debug)]
 pub struct TurnContext {
+    /// Explicit RB semantic transport policy inherited from the thread.
+    pub(crate) semantic_mode: bool,
+    pub(crate) semantic_final_message_count: std::sync::atomic::AtomicU32,
+    pub(crate) semantic_input: std::sync::OnceLock<Vec<ResponseItem>>,
     pub(crate) sub_id: String,
     pub(crate) trace_id: Option<String>,
     pub(crate) realtime_active: bool,
@@ -487,12 +491,16 @@ impl TurnContext {
         };
         config.model_reasoning_effort = reasoning_effort.clone();
 
-        let available_models = models_manager
-            .list_models(
-                RefreshStrategy::OnlineIfUncached,
-                config.http_client_factory(),
-            )
-            .await;
+        let available_models = if self.semantic_mode {
+            models_manager.try_list_models().unwrap_or_default()
+        } else {
+            models_manager
+                .list_models(
+                    RefreshStrategy::OnlineIfUncached,
+                    config.http_client_factory(),
+                )
+                .await
+        };
         let model_info = Arc::new(model_info);
         let mut selected = self.initial_settings.selected().clone();
         selected.collaboration_mode = selected.collaboration_mode.with_updates(
@@ -509,6 +517,12 @@ impl TurnContext {
         let session_telemetry = step_settings.telemetry(&self.session_telemetry);
 
         Self {
+            semantic_mode: self.semantic_mode,
+            semantic_final_message_count: std::sync::atomic::AtomicU32::new(
+                self.semantic_final_message_count
+                    .load(std::sync::atomic::Ordering::Acquire),
+            ),
+            semantic_input: self.semantic_input.clone(),
             sub_id: self.sub_id.clone(),
             trace_id: self.trace_id.clone(),
             realtime_active: self.realtime_active,
@@ -780,6 +794,9 @@ impl Session {
         let extension_data = Arc::new(codex_extension_api::ExtensionData::new(sub_id.clone()));
         extension_data.insert(skills_snapshot);
         TurnContext {
+            semantic_mode: session_configuration.semantic_mode,
+            semantic_final_message_count: std::sync::atomic::AtomicU32::new(0),
+            semantic_input: std::sync::OnceLock::new(),
             sub_id,
             trace_id: current_span_trace_id(),
             realtime_active: false,
@@ -931,12 +948,16 @@ impl Session {
             .map(TurnEnvironment::permission_profile)
             .cloned()
             .unwrap_or_else(|| session_configuration.permission_profile());
+        let mut model_info_overrides = session_configuration.model_info_overrides.clone();
+        if session_configuration.semantic_mode {
+            model_info_overrides.base_instructions = None;
+        }
         let model_info = session_configuration
             .step_settings
             .resolve_model_info(
                 self.services.models_manager.as_ref(),
-                &session_configuration.model_info_overrides,
-                self.features.enabled(Feature::Personality),
+                &model_info_overrides,
+                !session_configuration.semantic_mode && self.features.enabled(Feature::Personality),
             )
             .await;
         self.services
@@ -953,19 +974,27 @@ impl Session {
             ),
         };
         let plugins_input = per_turn_config.plugins_config_input();
-        let plugin_outcome = self
-            .services
-            .plugins_manager
-            .plugins_for_config(&plugins_input)
-            .await;
-        let trusted_plugin_roots = TrustedPluginRoots::from_plugin_load_outcome(
-            &plugin_outcome,
-            per_turn_config.codex_home.as_path(),
-        );
-        let skills_snapshot = if per_turn_config
-            .features
-            .enabled(Feature::SkipHostSkillDiscovery)
-            && !self.services.extensions.requires_host_skill_discovery()
+        let plugin_outcome = if session_configuration.semantic_mode {
+            Default::default()
+        } else {
+            self.services
+                .plugins_manager
+                .plugins_for_config(&plugins_input)
+                .await
+        };
+        let trusted_plugin_roots = if session_configuration.semantic_mode {
+            TrustedPluginRoots::default()
+        } else {
+            TrustedPluginRoots::from_plugin_load_outcome(
+                &plugin_outcome,
+                per_turn_config.codex_home.as_path(),
+            )
+        };
+        let skills_snapshot = if session_configuration.semantic_mode
+            || (per_turn_config
+                .features
+                .enabled(Feature::SkipHostSkillDiscovery)
+                && !self.services.extensions.requires_host_skill_discovery())
         {
             // Executor and orchestrator catalogs are supplied independently of host skills.
             HostSkillsSnapshot::new(Arc::new(SkillLoadOutcome::default()))

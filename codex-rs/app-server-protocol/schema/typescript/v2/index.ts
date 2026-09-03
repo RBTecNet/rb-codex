@@ -420,6 +420,8 @@ export type { ScheduledTaskSchedule } from "./ScheduledTaskSchedule";
 export type { ScheduledTaskSummary } from "./ScheduledTaskSummary";
 export type { ScheduledTaskWeekday } from "./ScheduledTaskWeekday";
 export type { SelectedCapabilityRoot } from "./SelectedCapabilityRoot";
+export type { SemanticCompletion } from "./SemanticCompletion";
+export type { SemanticPreflight } from "./SemanticPreflight";
 export type { SendAddCreditsNudgeEmailParams } from "./SendAddCreditsNudgeEmailParams";
 export type { SendAddCreditsNudgeEmailResponse } from "./SendAddCreditsNudgeEmailResponse";
 export type { ServerDiagnosticsGauge } from "./ServerDiagnosticsGauge";

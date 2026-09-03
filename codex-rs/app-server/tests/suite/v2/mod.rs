@@ -88,6 +88,7 @@ mod safety_check_downgrade;
 #[cfg(not(target_os = "windows"))]
 mod selected_capability_stack;
 mod selected_environment;
+mod semantic_mode;
 mod server_diagnostics;
 #[cfg(not(target_os = "windows"))]
 mod session_end;

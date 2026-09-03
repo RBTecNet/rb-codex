@@ -60,6 +60,11 @@ pub enum ThreadStartSource {
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub struct ThreadStartParams {
+    /// Enables the RB bounded semantic-transport envelope for this thread.
+    /// Omission preserves normal Codex behavior.
+    #[experimental("thread/start.semanticMode")]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub semantic_mode: bool,
     #[ts(optional = nullable)]
     pub model: Option<String>,
     #[ts(optional = nullable)]
@@ -209,6 +214,32 @@ pub struct ThreadStartResponse {
     #[experimental("thread/start.multiAgentMode")]
     #[serde(default)]
     pub multi_agent_mode: MultiAgentMode,
+    /// Present only for an explicitly requested RB semantic-mode thread.
+    #[experimental("thread/start.semanticMode")]
+    #[serde(default)]
+    pub semantic_preflight: Option<SemanticPreflight>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct SemanticPreflight {
+    pub semantic_mode: bool,
+    pub semantic_mode_version: String,
+    pub runtime_version: String,
+    pub model: String,
+    pub model_provider: String,
+    pub tool_policy: String,
+    pub effective_tool_count: u32,
+    pub tool_manifest_digest: String,
+    pub instruction_policy: String,
+    pub output_schema_strict: bool,
+    pub authenticated: bool,
+    pub auth_mode: String,
+    pub auth_store_kind: String,
+    pub session_mode: String,
+    pub requested_codex_turns: u32,
+    pub request_accounting: String,
 }
 
 impl ThreadStartResponse {

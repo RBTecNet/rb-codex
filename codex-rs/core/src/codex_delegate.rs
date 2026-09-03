@@ -113,6 +113,7 @@ pub(crate) async fn run_codex_thread_interactive(
     };
     let (session, io) = Box::pin(Session::spawn(SessionSpawnArgs {
         config,
+        semantic_mode: false,
         allow_provider_model_fallback: false,
         user_instructions,
         installation_id: parent_session.installation_id.clone(),

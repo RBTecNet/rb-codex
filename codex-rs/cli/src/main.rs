@@ -1,5 +1,6 @@
 use clap::Args;
 use clap::CommandFactory;
+use clap::FromArgMatches;
 use clap::Parser;
 use clap_complete::Shell;
 use clap_complete::generate;
@@ -70,6 +71,29 @@ use crate::remote_control_cmd::RemoteControlCommand;
 use doctor::DoctorCommand;
 use state_db_recovery as local_state_db;
 
+const CLI_VERSION: &str = env!("CARGO_PKG_VERSION");
+const CLI_BIN_NAME: &str = "codex";
+const CLI_USAGE: &str = "codex [OPTIONS] [PROMPT]\n       codex [OPTIONS] <COMMAND> [ARGS]";
+
+fn is_rb_semantic_binary() -> bool {
+    cfg!(feature = "rb-semantic-runtime")
+        && option_env!("CARGO_BIN_NAME") == Some(codex_core::rb_semantic::BINARY_NAME)
+}
+
+fn parse_multitool_cli() -> anyhow::Result<MultitoolCli> {
+    let mut command = MultitoolCli::command();
+    if is_rb_semantic_binary() {
+        command = command
+            .name(codex_core::rb_semantic::BINARY_NAME)
+            .bin_name(codex_core::rb_semantic::BINARY_NAME)
+            .version(codex_core::rb_semantic::CLI_VERSION)
+            .override_usage(
+                "rb-codex [OPTIONS] [PROMPT]\n       rb-codex [OPTIONS] <COMMAND> [ARGS]",
+            );
+    }
+    Ok(MultitoolCli::from_arg_matches(&command.get_matches())?)
+}
+
 use codex_config::LoaderOverrides;
 use codex_core::build_models_manager;
 use codex_core::config::Config;
@@ -102,14 +126,14 @@ use codex_terminal_detection::TerminalName;
 #[derive(Debug, Parser)]
 #[clap(
     author,
-    version,
+    version = CLI_VERSION,
     // If a sub‑command is given, ignore requirements of the default args.
     subcommand_negates_reqs = true,
     // The executable is sometimes invoked via a platform‑specific name like
     // `codex-x86_64-unknown-linux-musl`, but the help output should always use
     // the generic `codex` command name that users run.
-    bin_name = "codex",
-    override_usage = "codex [OPTIONS] [PROMPT]\n       codex [OPTIONS] <COMMAND> [ARGS]"
+    bin_name = CLI_BIN_NAME,
+    override_usage = CLI_USAGE
 )]
 struct MultitoolCli {
     #[clap(flatten)]
@@ -590,6 +614,10 @@ struct AppServerCommand {
     #[arg(long = "analytics-default-enabled")]
     analytics_default_enabled: bool,
 
+    /// Use this file-backed ChatGPT auth store without inheriting its CODEX_HOME.
+    #[arg(long = "auth-file", value_name = "PATH")]
+    auth_file: Option<PathBuf>,
+
     #[command(flatten)]
     auth: codex_app_server::AppServerWebsocketAuthArgs,
 }
@@ -1053,7 +1081,7 @@ async fn cli_main(
         remote,
         mut interactive,
         subcommand,
-    } = MultitoolCli::parse();
+    } = parse_multitool_cli()?;
     // Fold --enable/--disable into config overrides so they flow to all subcommands.
     let toggle_overrides = feature_toggles.to_overrides()?;
     root_config_overrides.raw_overrides.extend(toggle_overrides);
@@ -1251,6 +1279,7 @@ async fn cli_main(
                 stdio,
                 remote_control,
                 analytics_default_enabled,
+                auth_file,
                 auth,
             } = app_server_cli;
             let strict_config = app_server_strict_config || root_strict_config;
@@ -1269,6 +1298,13 @@ async fn cli_main(
                     };
                     let auth = auth.try_into_settings()?;
                     let runtime_options = codex_app_server::AppServerRuntimeOptions {
+                        explicit_auth_file: auth_file,
+                        rb_semantic_runtime: is_rb_semantic_binary(),
+                        plugin_startup_tasks: if is_rb_semantic_binary() {
+                            codex_app_server::PluginStartupTasks::Skip
+                        } else {
+                            codex_app_server::PluginStartupTasks::Start
+                        },
                         code_mode_host_transport: code_mode_host.into(),
                         remote_control_startup_mode: match (remote_control, remote_control_disabled)
                         {

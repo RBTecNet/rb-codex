@@ -11,6 +11,11 @@ name = "codex"
 path = "src/main.rs"
 
 [[bin]]
+name = "rb-codex"
+path = "src/rb_main.rs"
+required-features = ["rb-semantic-runtime"]
+
+[[bin]]
 name = "logs_client"
 path = "src/bin/logs_client.rs"
 
@@ -18,6 +23,9 @@ path = "src/bin/logs_client.rs"
 name = "codex_cli"
 path = "src/lib.rs"
 doctest = false
+
+[features]
+rb-semantic-runtime = []
 
 [lints]
 workspace = true

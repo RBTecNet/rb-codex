@@ -67,6 +67,8 @@ use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path_uri::LegacyAppPathString;
 use codex_utils_path_uri::PathUri;
 use rmcp::model::ReadResourceRequestParams;
+use sha2::Digest;
+use sha2::Sha256;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -77,6 +79,20 @@ use tokio_util::sync::CancellationToken;
 use codex_rollout::state_db::StateDbHandle;
 
 static LIVE_THREADS: Gauge = Gauge::new("core.threads.live");
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SemanticModeAttestation {
+    pub effective_tool_count: u32,
+    pub tool_manifest_digest: String,
+    pub output_schema_strict: bool,
+}
+
+fn sha256_json<T: serde::Serialize>(value: &T) -> CodexResult<String> {
+    let bytes = serde_json::to_vec(value)
+        .map_err(|err| CodexErr::Fatal(format!("failed to canonicalize semantic policy: {err}")))?;
+    let digest = Sha256::digest(bytes);
+    Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
+}
 
 #[derive(Clone, Debug)]
 pub struct ThreadConfigSnapshot {
@@ -772,8 +788,49 @@ impl CodexThread {
             .collect()
     }
 
+    /// Builds the exact request-scoped tool router and prompt policy without
+    /// opening a model stream. This is the pre-inference semantic-mode gate.
+    pub async fn semantic_mode_attestation(&self) -> CodexResult<SemanticModeAttestation> {
+        let turn_context = self.session.new_default_turn().await;
+        if !turn_context.semantic_mode {
+            return Err(CodexErr::InvalidRequest(
+                "semantic preflight requires an RB semantic-mode thread".to_string(),
+            ));
+        }
+        let step_context = self
+            .session
+            .capture_step_context(Arc::clone(&turn_context), &CancellationToken::new())
+            .await?;
+        let prompt = crate::session::turn::build_prompt(
+            Vec::new(),
+            step_context.as_ref(),
+            codex_protocol::models::BaseInstructions::default(),
+        );
+        let effective_tool_count = u32::try_from(prompt.tools.len())
+            .map_err(|_| CodexErr::Fatal("semantic tool count overflow".to_string()))?;
+        if effective_tool_count != 0 {
+            return Err(CodexErr::InvalidRequest(format!(
+                "RB semantic mode refused contaminated tool manifest ({effective_tool_count})"
+            )));
+        }
+        if prompt.output_schema_strict {
+            return Err(CodexErr::InvalidRequest(
+                "RB semantic mode requires non-strict output schemas".to_string(),
+            ));
+        }
+        Ok(SemanticModeAttestation {
+            effective_tool_count,
+            tool_manifest_digest: sha256_json(&prompt.tools.as_ref())?,
+            output_schema_strict: prompt.output_schema_strict,
+        })
+    }
+
     pub async fn config(&self) -> Arc<crate::config::Config> {
         self.session.get_config().await
+    }
+
+    pub async fn semantic_mode(&self) -> bool {
+        self.session.semantic_mode().await
     }
 
     /// Observes this thread's published MCP connections that match the requested config.

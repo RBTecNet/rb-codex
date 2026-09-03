@@ -16,6 +16,19 @@ pub(crate) struct ModelsRefreshWorker {
 }
 
 impl ModelsRefreshWorker {
+    /// Construct a worker that performs no model catalog I/O.
+    ///
+    /// RB semantic runtime resolves the explicitly selected model from the
+    /// effective thread configuration and must not perform model discovery.
+    pub(crate) fn disabled() -> Self {
+        let shutdown = CancellationToken::new();
+        shutdown.cancel();
+        Self {
+            shutdown,
+            _task: tokio::spawn(async {}),
+        }
+    }
+
     pub(crate) fn shutdown(&self) {
         self.shutdown.cancel();
     }

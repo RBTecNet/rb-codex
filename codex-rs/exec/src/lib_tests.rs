@@ -415,6 +415,7 @@ fn should_backfill_turn_completed_items_backfills_persisted_summaries_only() {
                 completed_at: None,
                 duration_ms: None,
             },
+            semantic_completion: None,
         });
 
     assert!(!should_backfill_turn_completed_items(
@@ -859,5 +860,6 @@ fn sample_thread_start_response() -> ThreadStartResponse {
         active_permission_profile: None,
         reasoning_effort: None,
         multi_agent_mode: Default::default(),
+        semantic_preflight: None,
     }
 }

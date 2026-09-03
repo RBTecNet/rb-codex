@@ -19059,6 +19059,108 @@
         ],
         "type": "object"
       },
+      "SemanticCompletion": {
+        "properties": {
+          "finalModel": {
+            "type": "string"
+          },
+          "finalModelProvider": {
+            "type": "string"
+          },
+          "initialModel": {
+            "type": "string"
+          },
+          "initialModelProvider": {
+            "type": "string"
+          },
+          "rerouted": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "finalModel",
+          "finalModelProvider",
+          "initialModel",
+          "initialModelProvider",
+          "rerouted"
+        ],
+        "type": "object"
+      },
+      "SemanticPreflight": {
+        "properties": {
+          "authMode": {
+            "type": "string"
+          },
+          "authStoreKind": {
+            "type": "string"
+          },
+          "authenticated": {
+            "type": "boolean"
+          },
+          "effectiveToolCount": {
+            "format": "uint32",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "instructionPolicy": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          },
+          "modelProvider": {
+            "type": "string"
+          },
+          "outputSchemaStrict": {
+            "type": "boolean"
+          },
+          "requestAccounting": {
+            "type": "string"
+          },
+          "requestedCodexTurns": {
+            "format": "uint32",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "runtimeVersion": {
+            "type": "string"
+          },
+          "semanticMode": {
+            "type": "boolean"
+          },
+          "semanticModeVersion": {
+            "type": "string"
+          },
+          "sessionMode": {
+            "type": "string"
+          },
+          "toolManifestDigest": {
+            "type": "string"
+          },
+          "toolPolicy": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "authMode",
+          "authStoreKind",
+          "authenticated",
+          "effectiveToolCount",
+          "instructionPolicy",
+          "model",
+          "modelProvider",
+          "outputSchemaStrict",
+          "requestAccounting",
+          "requestedCodexTurns",
+          "runtimeVersion",
+          "semanticMode",
+          "semanticModeVersion",
+          "sessionMode",
+          "toolManifestDigest",
+          "toolPolicy"
+        ],
+        "type": "object"
+      },
       "SendAddCreditsNudgeEmailParams": {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "properties": {

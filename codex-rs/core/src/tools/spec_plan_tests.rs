@@ -257,6 +257,28 @@ async fn probe(configure_turn: impl FnOnce(&mut TurnContext)) -> ToolPlanProbe {
     probe_with(configure_turn, ToolPlanInputs::default()).await
 }
 
+#[tokio::test]
+async fn semantic_mode_clears_a_late_extension_tool_after_normal_registry_construction() {
+    let plan = probe_with(
+        |turn| turn.semantic_mode = true,
+        ToolPlanInputs {
+            extension_tool_executors: vec![Arc::new(TestNamespaceExtensionTool {
+                namespace: "future_extension",
+                tool_name: "late_tool",
+            })],
+            ..Default::default()
+        },
+    )
+    .await;
+
+    assert!(plan.visible_specs.is_empty());
+    assert!(
+        plan.registered_names
+            .iter()
+            .any(|name| name.ends_with("late_tool"))
+    );
+}
+
 fn set_feature(turn: &mut TurnContext, feature: Feature, enabled: bool) {
     let mut config = (*turn.config).clone();
     if enabled {

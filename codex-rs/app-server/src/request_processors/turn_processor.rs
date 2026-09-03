@@ -511,6 +511,33 @@ impl TurnRequestProcessor {
                 })?;
         self.ensure_direct_input_allowed(&request_id, thread.as_ref())
             .await?;
+        let semantic_mode = thread.semantic_mode().await;
+        if semantic_mode
+            && (params.input.is_empty()
+                || params.output_schema.is_none()
+                || params.tool_output.is_some()
+                || params.additional_context.is_some()
+                || params.environments.is_some()
+                || params.collaboration_mode.is_some()
+                || params.cwd.is_some()
+                || params.runtime_workspace_roots.is_some()
+                || params.approval_policy.is_some()
+                || params.approvals_reviewer.is_some()
+                || params.sandbox_policy.is_some()
+                || params.permissions.is_some()
+                || params.model.is_some()
+                || params.service_tier.is_some()
+                || params.service_tier_for_turn.is_some()
+                || params.effort.is_some()
+                || params.summary.is_some()
+                || params.personality.is_some()
+                || params.cyber_access_program.is_some()
+                || params.responsesapi_client_metadata.is_some())
+        {
+            return Err(invalid_request(
+                "RB semantic mode requires non-empty input plus outputSchema and rejects turn overrides/extensions",
+            ));
+        }
         if let Some(tool_output) = &params.tool_output {
             if !params.input.is_empty() {
                 return Err(invalid_request(

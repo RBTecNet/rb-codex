@@ -737,6 +737,8 @@ async fn mcp_resource_read_returns_error_for_unknown_thread() -> Result<()> {
         config_warnings: Vec::new(),
         session_source: SessionSource::Cli,
         enable_codex_api_key_env: false,
+        explicit_auth_file: None,
+        rb_semantic_runtime: false,
         initialize: InitializeParams {
             client_info: ClientInfo {
                 name: "codex-app-server-tests".to_string(),

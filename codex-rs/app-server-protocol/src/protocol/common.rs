@@ -3155,6 +3155,7 @@ mod tests {
                 active_permission_profile: None,
                 reasoning_effort: None,
                 multi_agent_mode: MultiAgentMode::ExplicitRequestOnly,
+                semantic_preflight: None,
             },
         };
 
@@ -3209,7 +3210,8 @@ mod tests {
                     },
                     "activePermissionProfile": null,
                     "reasoningEffort": null,
-                    "multiAgentMode": "explicitRequestOnly"
+                    "multiAgentMode": "explicitRequestOnly",
+                    "semanticPreflight": null
                 }
             }),
             serde_json::to_value(&response)?,

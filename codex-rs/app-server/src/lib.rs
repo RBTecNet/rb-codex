@@ -441,6 +441,8 @@ pub struct AppServerRuntimeOptions {
     pub plugin_startup_tasks: PluginStartupTasks,
     pub remote_control_startup_mode: RemoteControlStartupMode,
     pub install_shutdown_signal_handler: bool,
+    pub explicit_auth_file: Option<std::path::PathBuf>,
+    pub rb_semantic_runtime: bool,
 }
 
 impl Default for AppServerRuntimeOptions {
@@ -450,6 +452,8 @@ impl Default for AppServerRuntimeOptions {
             plugin_startup_tasks: PluginStartupTasks::Start,
             remote_control_startup_mode: RemoteControlStartupMode::ResolvePersisted,
             install_shutdown_signal_handler: true,
+            explicit_auth_file: None,
+            rb_semantic_runtime: false,
         }
     }
 }
@@ -504,10 +508,14 @@ pub async fn run_main_with_transport_options(
         .await
     {
         Ok(config) => {
-            let auth_manager =
-                AuthManager::shared_from_config(&config, /*enable_codex_api_key_env*/ false)
-                    .await
-                    .map_err(std::io::Error::other)?;
+            let auth_manager = match runtime_options.explicit_auth_file.as_deref() {
+                Some(path) => AuthManager::shared_from_explicit_auth_file(&config, path).await?,
+                None => AuthManager::shared_from_config(
+                    &config, /*enable_codex_api_key_env*/ false,
+                )
+                .await
+                .map_err(std::io::Error::other)?,
+            };
             config_manager.replace_cloud_config_bundle_loader(
                 auth_manager,
                 config.chatgpt_base_url.clone(),
@@ -751,10 +759,12 @@ pub async fn run_main_with_transport_options(
     }
     drop(unix_socket_startup_lock);
 
-    let auth_manager =
-        AuthManager::shared_from_config(&config, /*enable_codex_api_key_env*/ false)
+    let auth_manager = match runtime_options.explicit_auth_file.as_deref() {
+        Some(path) => AuthManager::shared_from_explicit_auth_file(&config, path).await?,
+        None => AuthManager::shared_from_config(&config, /*enable_codex_api_key_env*/ false)
             .await
-            .map_err(std::io::Error::other)?;
+            .map_err(std::io::Error::other)?,
+    };
 
     let remote_control_enabled = remote_control_policy == RemoteControlPolicy::Allowed
         && remote_control_explicitly_requested
@@ -887,8 +897,11 @@ pub async fn run_main_with_transport_options(
 
     let processor_handle = tokio::spawn({
         let auth_manager = Arc::clone(&auth_manager);
-        let analytics_events_client =
-            analytics_events_client_from_config(Arc::clone(&auth_manager), &config);
+        let analytics_events_client = if runtime_options.rb_semantic_runtime {
+            codex_analytics::AnalyticsEventsClient::disabled()
+        } else {
+            analytics_events_client_from_config(Arc::clone(&auth_manager), &config)
+        };
         let outgoing_message_sender = Arc::new(OutgoingMessageSender::new(
             outgoing_tx,
             analytics_events_client.clone(),
@@ -913,6 +926,7 @@ pub async fn run_main_with_transport_options(
             rpc_transport: analytics_rpc_transport(&transport),
             remote_control_handle: Some(remote_control_handle.clone()),
             plugin_startup_tasks: runtime_options.plugin_startup_tasks,
+            rb_semantic_runtime: runtime_options.rb_semantic_runtime,
         }));
         let mut thread_created_rx = processor.thread_created_receiver();
         let mut running_turn_count_rx = processor.subscribe_running_assistant_turn_count();

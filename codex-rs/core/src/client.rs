@@ -521,6 +521,16 @@ impl ModelClient {
         self
     }
 
+    /// Force the session to use the HTTP Responses transport without probing
+    /// or opening a WebSocket. RB semantic transport uses this to keep the
+    /// process envelope to one observable provider request path.
+    pub(crate) fn with_websockets_disabled(self, disabled: bool) -> Self {
+        self.state
+            .disable_websockets
+            .store(disabled, Ordering::Relaxed);
+        self
+    }
+
     pub(crate) fn with_prompt_cache_key_override(
         mut self,
         prompt_cache_key_override: Option<String>,
@@ -1022,6 +1032,106 @@ impl ModelClient {
             access_programs: None,
         };
         Ok(request)
+    }
+
+    /// Final RB semantic policy boundary. This operates on the concrete
+    /// provider request after prompt serialization and immediately before
+    /// dispatch, so a late request contributor cannot bypass preflight.
+    fn validate_semantic_responses_request(
+        &self,
+        prompt: &Prompt,
+        model_info: &ModelInfo,
+        request: &ResponsesApiRequest,
+    ) -> Result<()> {
+        let Some(policy) = prompt.semantic_policy.as_ref() else {
+            return Ok(());
+        };
+
+        let request_json = serde_json::to_value(request)
+            .map_err(|err| CodexErr::Fatal(format!("failed to inspect semantic request: {err}")))?;
+        let effective_tool_count = if model_info.use_responses_lite {
+            request
+                .input
+                .first()
+                .and_then(|item| match item {
+                    ResponseItem::AdditionalTools { tools, .. } => Some(tools.len()),
+                    _ => None,
+                })
+                .unwrap_or(usize::MAX)
+        } else {
+            request_json
+                .get("tools")
+                .and_then(serde_json::Value::as_array)
+                .map(Vec::len)
+                .unwrap_or(usize::MAX)
+        };
+        if effective_tool_count != 0 {
+            return Err(CodexErr::InvalidRequest(format!(
+                "RB semantic mode refused final tool manifest: category=otherToolEvents count={effective_tool_count}"
+            )));
+        }
+
+        let mut instruction_contamination_count = 0_u32;
+        if request.model != policy.model {
+            instruction_contamination_count += 1;
+        }
+        if model_info.use_responses_lite {
+            if !request.instructions.is_empty() {
+                instruction_contamination_count += 1;
+            }
+            let prefix_count = if policy.model_instructions.is_empty() {
+                1
+            } else {
+                2
+            };
+            let valid_prefix = request.input.len()
+                == prefix_count + policy.authoritative_input.len()
+                && matches!(
+                    request.input.first(),
+                    Some(ResponseItem::AdditionalTools { role, tools, .. })
+                        if role == "developer" && tools.is_empty()
+                )
+                && (policy.model_instructions.is_empty()
+                    || matches!(
+                        request.input.get(1),
+                        Some(ResponseItem::Message { role, content, .. })
+                            if role == "developer"
+                                && content == &vec![codex_protocol::models::ContentItem::InputText {
+                                    text: policy.model_instructions.clone(),
+                                }]
+                    ))
+                && request.input[prefix_count..] == policy.authoritative_input;
+            if !valid_prefix {
+                instruction_contamination_count += 1;
+            }
+        } else {
+            if request.instructions != policy.model_instructions {
+                instruction_contamination_count += 1;
+            }
+            if request.input != policy.authoritative_input {
+                instruction_contamination_count += 1;
+            }
+        }
+        if request.access_programs.is_some() {
+            instruction_contamination_count += 1;
+        }
+        if instruction_contamination_count != 0 {
+            return Err(CodexErr::InvalidRequest(format!(
+                "RB semantic mode refused final instruction contamination: instructionContaminationCount={instruction_contamination_count}"
+            )));
+        }
+
+        let Some(format) = request.text.as_ref().and_then(|text| text.format.as_ref()) else {
+            return Err(CodexErr::InvalidRequest(
+                "RB semantic mode requires an output schema".to_string(),
+            ));
+        };
+        if format.strict || Some(&format.schema) != policy.output_schema.as_ref() {
+            return Err(CodexErr::InvalidRequest(
+                "RB semantic mode refused altered or strict output schema".to_string(),
+            ));
+        }
+        Ok(())
     }
 
     fn prepare_response_items_for_request(&self, input: &mut [ResponseItem]) {
@@ -1627,6 +1737,8 @@ impl ModelClientSession {
             );
             self.client
                 .prepare_response_items_for_request(&mut request.input);
+            self.client
+                .validate_semantic_responses_request(prompt, model_info, &request)?;
             let request_session_telemetry =
                 session_telemetry_for_request(session_telemetry, &request);
             let inference_trace_attempt = inference_trace.start_attempt();
@@ -1755,6 +1867,10 @@ impl ModelClientSession {
                 client_setup.auth.as_ref(),
                 prompt.cyber_access_program,
             );
+            self.client
+                .prepare_response_items_for_request(&mut request.input);
+            self.client
+                .validate_semantic_responses_request(prompt, model_info, &request)?;
             let mut websocket_metadata = responses_metadata.clone();
             websocket_metadata.routing_hint = if endpoint == ResponsesEndpoint::Responses {
                 self.client.build_routing_hint_header(

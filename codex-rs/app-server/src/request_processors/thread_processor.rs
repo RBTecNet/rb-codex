@@ -15,6 +15,7 @@ use codex_app_server_protocol::ThreadSection;
 use codex_app_server_protocol::ThreadSectionAppearance;
 use codex_app_server_protocol::ThreadSectionMoveParams;
 use codex_app_server_protocol::ThreadSectionMoveResponse;
+use codex_core::rb_semantic;
 use codex_extension_api::ExtensionDataInit;
 use codex_extension_api::ThreadIdleCause;
 use codex_protocol::SanitizedGitUrl;
@@ -446,6 +447,7 @@ pub(crate) struct ThreadRequestProcessor {
     pub(super) skills_watcher: Arc<SkillsWatcher>,
     pub(super) turn_cost_worker: Option<crate::turn_cost_worker::TurnCostWorkerHandle>,
     pub(super) initial_config_warnings: Arc<Vec<ConfigWarningNotification>>,
+    pub(super) rb_semantic_runtime: bool,
 }
 
 /// Outcome of trying to satisfy a resume request from an already loaded thread.
@@ -479,6 +481,7 @@ impl ThreadRequestProcessor {
         skills_watcher: Arc<SkillsWatcher>,
         turn_cost_worker: Option<crate::turn_cost_worker::TurnCostWorkerHandle>,
         initial_config_warnings: Vec<ConfigWarningNotification>,
+        rb_semantic_runtime: bool,
     ) -> Self {
         Self {
             auth_manager,
@@ -499,6 +502,7 @@ impl ThreadRequestProcessor {
             skills_watcher,
             turn_cost_worker,
             initial_config_warnings: Arc::new(initial_config_warnings),
+            rb_semantic_runtime,
         }
     }
 
@@ -1114,6 +1118,7 @@ impl ThreadRequestProcessor {
         request_context: RequestContext,
     ) -> Result<(), JSONRPCErrorError> {
         let ThreadStartParams {
+            semantic_mode,
             model,
             model_provider,
             allow_provider_model_fallback,
@@ -1141,6 +1146,29 @@ impl ThreadRequestProcessor {
             project_id,
             environments,
         } = params;
+        if semantic_mode
+            && (!self.rb_semantic_runtime || !self.auth_manager.uses_explicit_file_auth())
+        {
+            return Err(invalid_request(
+                "RB semantic mode requires rb-codex app-server with --auth-file",
+            ));
+        }
+        if semantic_mode
+            && (config.is_some()
+                || base_instructions.is_some()
+                || developer_instructions.is_some()
+                || personality.is_some()
+                || dynamic_tools.is_some()
+                || selected_capability_roots.is_some()
+                || environments.is_some()
+                || project_id.is_some()
+                || history_mode.is_some()
+                || ephemeral == Some(false))
+        {
+            return Err(invalid_request(
+                "RB semantic mode rejects custom config/instructions/extensions and requires ephemeral state",
+            ));
+        }
         if matches!(
             history_mode,
             Some(codex_app_server_protocol::ThreadHistoryMode::Paginated)
@@ -1190,7 +1218,7 @@ impl ThreadRequestProcessor {
             developer_instructions,
             personality,
         );
-        typesafe_overrides.ephemeral = ephemeral;
+        typesafe_overrides.ephemeral = if semantic_mode { Some(true) } else { ephemeral };
         let listener_task_context = ListenerTaskContext {
             thread_manager: Arc::clone(&self.thread_manager),
             thread_state_manager: self.thread_state_manager.clone(),
@@ -1229,6 +1257,7 @@ impl ThreadRequestProcessor {
                 environments,
                 service_name,
                 allow_provider_model_fallback,
+                semantic_mode,
                 experimental_raw_events,
                 request_trace,
                 initial_config_warnings,
@@ -1308,6 +1337,7 @@ impl ThreadRequestProcessor {
         environment_selections: Option<Vec<TurnEnvironmentSelection>>,
         service_name: Option<String>,
         allow_provider_model_fallback: bool,
+        semantic_mode: bool,
         experimental_raw_events: bool,
         request_trace: Option<W3cTraceContext>,
         initial_config_warnings: Arc<Vec<ConfigWarningNotification>>,
@@ -1318,6 +1348,13 @@ impl ThreadRequestProcessor {
             .load_with_overrides(config_overrides.clone(), typesafe_overrides.clone())
             .await
             .map_err(|err| config_load_error(&err))?;
+        if semantic_mode
+            && config.model_provider_id != codex_model_provider_info::OPENAI_PROVIDER_ID
+        {
+            return Err(invalid_request(
+                "RB semantic mode requires the OpenAI Codex provider",
+            ));
+        }
         // Project-local config can launch host processes, so only the effective
         // permissions after managed constraints can imply project trust.
         let effective_permission_profile = config.permissions.effective_permission_profile();
@@ -1425,6 +1462,7 @@ impl ThreadRequestProcessor {
             thread_extension_init.insert(selected_capability_roots);
         }
         let mut start_options = StartThreadOptions::new(config);
+        start_options.semantic_mode = semantic_mode;
         let reserved_thread_id = if start_options.config.ephemeral {
             None
         } else {
@@ -1496,7 +1534,21 @@ impl ThreadRequestProcessor {
         )
         .await?;
 
-        let instruction_sources = thread.legacy_instruction_sources().await;
+        let instruction_sources = if semantic_mode {
+            Vec::new()
+        } else {
+            thread.legacy_instruction_sources().await
+        };
+        let semantic_attestation = if semantic_mode {
+            Some(
+                thread
+                    .semantic_mode_attestation()
+                    .await
+                    .map_err(|err| invalid_request(err.to_string()))?,
+            )
+        } else {
+            None
+        };
         let config_snapshot = thread
             .config_snapshot()
             .instrument(tracing::info_span!(
@@ -1561,8 +1613,8 @@ impl ThreadRequestProcessor {
 
         let response = ThreadStartResponse {
             thread: thread.clone(),
-            model: config_snapshot.model,
-            model_provider: config_snapshot.model_provider_id,
+            model: config_snapshot.model.clone(),
+            model_provider: config_snapshot.model_provider_id.clone(),
             service_tier: config_snapshot.service_tier,
             cwd,
             runtime_workspace_roots: config_snapshot.workspace_roots,
@@ -1573,6 +1625,26 @@ impl ThreadRequestProcessor {
             active_permission_profile,
             reasoning_effort: config_snapshot.reasoning_effort,
             multi_agent_mode: MultiAgentMode::ExplicitRequestOnly,
+            semantic_preflight: semantic_attestation.map(|attestation| {
+                codex_app_server_protocol::SemanticPreflight {
+                    semantic_mode: true,
+                    semantic_mode_version: rb_semantic::MODE_VERSION.to_string(),
+                    runtime_version: rb_semantic::RUNTIME_VERSION.to_string(),
+                    model: config_snapshot.model.clone(),
+                    model_provider: config_snapshot.model_provider_id.clone(),
+                    tool_policy: rb_semantic::TOOL_POLICY_NONE.to_string(),
+                    effective_tool_count: attestation.effective_tool_count,
+                    tool_manifest_digest: attestation.tool_manifest_digest,
+                    instruction_policy: rb_semantic::INSTRUCTION_POLICY_ISOLATED.to_string(),
+                    output_schema_strict: attestation.output_schema_strict,
+                    authenticated: true,
+                    auth_mode: "chatgpt".to_string(),
+                    auth_store_kind: "file".to_string(),
+                    session_mode: rb_semantic::SESSION_MODE_EPHEMERAL.to_string(),
+                    requested_codex_turns: rb_semantic::REQUESTED_CODEX_TURNS,
+                    request_accounting: rb_semantic::REQUEST_ACCOUNTING_OPAQUE.to_string(),
+                }
+            }),
         };
         let notif = thread_started_notification(thread);
         listener_task_context

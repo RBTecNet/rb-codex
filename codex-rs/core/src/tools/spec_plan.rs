@@ -475,13 +475,20 @@ pub(crate) fn finalize_tool_router(
         }
     }
 
-    let model_visible_specs = build_model_visible_specs(
+    let mut model_visible_specs = build_model_visible_specs(
         turn_context,
         model_info,
         &registry,
         &code_mode_tool_names,
         hosted_specs,
     );
+    // This is deliberately the last model-visible tool policy boundary: every
+    // normal contributor is assembled first, then semantic mode clears the
+    // actual list passed to sampling. Future contributors therefore cannot
+    // become visible merely because an earlier feature deny-list missed them.
+    if turn_context.semantic_mode {
+        model_visible_specs.clear();
+    }
     let tool_namespaces_info = include_tool_namespaces_info
         .then(|| {
             collect_tool_namespaces_info(&registry, &code_mode_tool_names, &model_visible_specs)

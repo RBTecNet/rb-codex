@@ -227,6 +227,8 @@ pub struct ThreadManager {
 
 pub struct StartThreadOptions {
     pub config: Config,
+    /// Enables the fail-closed RB semantic transport envelope.
+    pub semantic_mode: bool,
     pub allow_provider_model_fallback: bool,
     pub initial_history: InitialHistory,
     pub history_mode: Option<ThreadHistoryMode>,
@@ -246,6 +248,7 @@ impl StartThreadOptions {
     pub fn new(config: Config) -> Self {
         Self {
             config,
+            semantic_mode: false,
             allow_provider_model_fallback: false,
             initial_history: InitialHistory::New,
             history_mode: None,
@@ -1860,6 +1863,7 @@ impl ThreadManagerState {
         } = request;
         let StartThreadOptions {
             config,
+            semantic_mode,
             allow_provider_model_fallback,
             initial_history,
             history_mode,
@@ -1914,7 +1918,7 @@ impl ThreadManagerState {
             extensions,
             mcp_manager,
             multi_agent_version,
-        ) = if crate::guardian::is_basic_session_source(&session_source) {
+        ) = if semantic_mode || crate::guardian::is_basic_session_source(&session_source) {
             (
                 LoadedUserInstructions::default(),
                 None,
@@ -1974,6 +1978,7 @@ impl ThreadManagerState {
         };
         let (session, io) = Box::pin(Session::spawn(SessionSpawnArgs {
             config,
+            semantic_mode,
             allow_provider_model_fallback,
             user_instructions,
             installation_id: self.installation_id.clone(),

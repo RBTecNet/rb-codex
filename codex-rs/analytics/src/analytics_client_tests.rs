@@ -289,6 +289,7 @@ fn sample_thread_start_response(
         active_permission_profile: None,
         reasoning_effort: None,
         multi_agent_mode: Default::default(),
+        semantic_preflight: None,
     })
 }
 
@@ -451,6 +452,7 @@ fn sample_turn_completed_notification(
             completed_at: Some(456),
             duration_ms: Some(1234),
         },
+        semantic_completion: None,
     })
 }
 

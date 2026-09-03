@@ -3731,6 +3731,33 @@
         }
       ]
     },
+    "SemanticCompletion": {
+      "properties": {
+        "finalModel": {
+          "type": "string"
+        },
+        "finalModelProvider": {
+          "type": "string"
+        },
+        "initialModel": {
+          "type": "string"
+        },
+        "initialModelProvider": {
+          "type": "string"
+        },
+        "rerouted": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "finalModel",
+        "finalModelProvider",
+        "initialModel",
+        "initialModelProvider",
+        "rerouted"
+      ],
+      "type": "object"
+    },
     "ServerRequestResolvedNotification": {
       "properties": {
         "requestId": {

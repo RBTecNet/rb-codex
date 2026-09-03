@@ -46,6 +46,26 @@ pub(crate) struct McpRuntimeProjection {
     pub(crate) selected_plugins: SelectedPluginSnapshot,
 }
 
+impl McpRuntimeProjection {
+    /// Build the thread-owned MCP projection for RB semantic transport without
+    /// consulting plugin, app, connector, or remote MCP contributors.
+    pub(crate) fn semantic_isolated(config: &Config) -> Self {
+        let mut mcp_config = config.to_mcp_config_with_loaded_plugins(
+            &codex_core_plugins::PluginLoadOutcome::default(),
+            std::iter::empty::<McpServerRegistration>(),
+        );
+        mcp_config.apps_enabled = false;
+        mcp_config.mcp_server_catalog = Default::default();
+        mcp_config.connector_snapshot = Default::default();
+        mcp_config.non_prefixed_mcp_tool_servers.clear();
+        Self {
+            config: mcp_config,
+            plugins_available: false,
+            selected_plugins: SelectedPluginSnapshot::default(),
+        }
+    }
+}
+
 pub(crate) enum McpEnvironmentScope<'a> {
     /// Controller-level operations without an associated thread.
     HostOnly,
